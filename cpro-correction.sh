@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
 # Correction automatique indicative - Activité C-PRO Linux Debian 13
-# Usage conseillé : bash check_cpro_linux_debian13.sh
-# Option : EXPECTED_USER=ciel EXPECTED_HOSTNAME=ciel-linux bash check_cpro_linux_debian13.sh
+# Version fusionnée avec contrôle de configuration réseau statique.
+#
+# Usage conseillé : bash check_cpro_linux_debian13_avec_reseau.sh
+# Option : EXPECTED_USER=ciel EXPECTED_HOSTNAME=ciel-linux bash check_cpro_linux_debian13_avec_reseau.sh
+# Option réseau : EXPECTED_IP=192.168.56.50 EXPECTED_CIDR=24 EXPECTED_GATEWAY=192.168.56.1 EXPECTED_DNS1=1.1.1.1 EXPECTED_DNS2=9.9.9.9 bash check_cpro_linux_debian13_avec_reseau.sh
+# Option dossier : bash check_cpro_linux_debian13_avec_reseau.sh /home/ciel
 set -u
 
 EXPECTED_USER="${EXPECTED_USER:-ciel}"
 EXPECTED_HOSTNAME="${EXPECTED_HOSTNAME:-ciel-linux}"
 EXPECTED_BASE_NAME="${EXPECTED_BASE_NAME:-AP_CPRO_LINUX}"
-MAX=100
+
+# Paramètres réseau attendus pour la partie "configuration réseau statique".
+EXPECTED_IP="${EXPECTED_IP:-192.168.56.50}"
+EXPECTED_CIDR="${EXPECTED_CIDR:-24}"
+EXPECTED_GATEWAY="${EXPECTED_GATEWAY:-192.168.56.1}"
+EXPECTED_DNS1="${EXPECTED_DNS1:-1.1.1.1}"
+EXPECTED_DNS2="${EXPECTED_DNS2:-9.9.9.9}"
+
+# Le barème original était sur 100. La vérification réseau statique remplace
+# l'ancien contrôle réseau très général de 2 points et ajoute 22 points dédiés.
+# Total indicatif : 120 points.
+MAX=120
 SCORE=0
 WARNINGS=0
 
@@ -37,6 +52,11 @@ section() {
   printf '\n=== %s ===\n' "$1"
 }
 
+escape_egrep() {
+  # Échappe une chaîne pour un usage simple dans grep -E.
+  printf '%s' "$1" | sed 's/[.[\*^$()+?{}|\\]/\\&/g'
+}
+
 # Détection du dossier élève.
 if [[ "${1:-}" != "" ]]; then
   STUDENT_HOME="$1"
@@ -61,13 +81,22 @@ INVFILE="$BASE/donnees/inventaire.csv"
 FICHE="$BASE/config/fiche_poste.txt"
 CHECKLIST="$BASE/config/checklist_installation.txt"
 
+PROOF_INTERFACE="$BASE/preuves/interface_reseau.txt"
+PROOF_IP="$BASE/preuves/ip_apres_modification.txt"
+PROOF_ROUTE="$BASE/preuves/route_apres_modification.txt"
+PROOF_DNS="$BASE/preuves/dns_apres_modification.txt"
+PROOF_TEST="$BASE/preuves/test_reseau.txt"
+
 printf 'Correction automatique indicative - C-PRO Linux Debian 13\n'
 printf 'Utilisateur attendu : %s\n' "$EXPECTED_USER"
 printf 'Hostname attendu    : %s\n' "$EXPECTED_HOSTNAME"
 printf 'Dossier évalué      : %s\n' "$BASE"
-printf '----------------------------------------\n'
+printf 'IP attendue         : %s/%s\n' "$EXPECTED_IP" "$EXPECTED_CIDR"
+printf 'Passerelle attendue : %s\n' "$EXPECTED_GATEWAY"
+printf 'DNS attendus        : %s, %s\n' "$EXPECTED_DNS1" "$EXPECTED_DNS2"
+printf '%s\n' '----------------------------------------'
 
-# 1. Installation et système - 20 pts
+# 1. Installation et système - 18 pts
 section "1. Installation et système"
 if [[ -r /etc/os-release ]] && grep -qi '^ID=debian' /etc/os-release; then
   if grep -Eq '^VERSION_ID="?13"?' /etc/os-release; then
@@ -105,7 +134,7 @@ else
   add_ok 2 "vérification root ignorée proprement"
 fi
 
-if has_cmd systemctl && systemctl is-active --quiet ssh 2>/dev/null; then
+if has_cmd systemctl && { systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; }; then
   add_ok 3 "service SSH actif"
 elif has_cmd sshd || [[ -x /usr/sbin/sshd ]]; then
   add_ok 1 "OpenSSH semble installé, mais le service SSH n'est pas confirmé actif"
@@ -114,14 +143,7 @@ else
   add_bad "OpenSSH Server non détecté"
 fi
 
-NON_LOOP_IP="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | head -n 1 || true)"
-DEFAULT_ROUTE="$(ip route show default 2>/dev/null | head -n 1 || true)"
-DNS_LINE="$(grep -E '^nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null | head -n 1 || true)"
-if [[ -n "$NON_LOOP_IP" && -n "$DEFAULT_ROUTE" && -n "$DNS_LINE" ]]; then
-  add_ok 2 "réseau IPv4, route par défaut et DNS visibles"
-else
-  add_bad "réseau incomplet : IPv4='$NON_LOOP_IP', route='$DEFAULT_ROUTE', DNS='$DNS_LINE'"
-fi
+add_info "la configuration réseau détaillée est contrôlée dans la section 6, pour éviter un doublon de barème"
 
 # 2. Arborescence et fichiers - 20 pts
 section "2. Arborescence et fichiers"
@@ -196,10 +218,11 @@ fi
 section "3. Droits et permissions"
 perm_of() { stat -c '%a' "$1" 2>/dev/null || echo 'NA'; }
 
-if [[ -d "$BASE/bin" && "$(perm_of "$BASE/bin")" =~ ^7[0-5][0-5]$|^755$ ]]; then
+BIN_PERM="$(perm_of "$BASE/bin")"
+if [[ -d "$BASE/bin" && ( "$BIN_PERM" == "755" || "$BIN_PERM" =~ ^7[0-5][0-5]$ ) ]]; then
   add_ok 2 "droits du dossier bin corrects ou acceptables"
 else
-  add_bad "droits du dossier bin inattendus : $(perm_of "$BASE/bin")"
+  add_bad "droits du dossier bin inattendus : $BIN_PERM"
 fi
 
 if [[ -d "$BASE/rapports" && "$(perm_of "$BASE/rapports")" == "700" ]]; then
@@ -241,7 +264,7 @@ else
   add_bad "script non exécutable ou absent : $SCRIPT"
 fi
 
-# 4. Script Bash - 25 pts
+# 4. Script Bash - 25 pts indiqués dans le sujet original, 23 pts effectivement attribuables ici
 section "4. Script Bash"
 if [[ -f "$SCRIPT" ]]; then
   add_ok 2 "script présent"
@@ -251,7 +274,6 @@ if [[ -f "$SCRIPT" ]]; then
     add_bad "erreur de syntaxe Bash : $(tr '\n' ' ' </tmp/check_cpro_bashn.err | cut -c1-180)"
   fi
 
-  SCRIPT_TEXT="$(cat "$SCRIPT" 2>/dev/null || true)"
   for token in 'BASE=' 'RAPPORT=' 'LOG=' 'SEUIL='; do
     if grep -q "$token" "$SCRIPT"; then
       add_ok 1 "variable détectée dans le script : $token"
@@ -282,7 +304,7 @@ if [[ -f "$SCRIPT" ]]; then
     add_bad "trop peu de commandes attendues dans le script (${CMD_COUNT}/${#REQUIRED_CMDS[@]})"
   fi
 
-  if grep -Eq 'Failed password' "$SCRIPT" && grep -Eq 'from' "$SCRIPT" && grep -Eq 'ALERTE|SEUIL|seuil' "$SCRIPT"; then
+  if grep -Eq 'Failed password' "$SCRIPT" && grep -Eq 'from' "$SCRIPT" && grep -Eqi 'ALERTE|SEUIL|seuil' "$SCRIPT"; then
     add_ok 4 "analyse des logs SSH prévue dans le script"
   else
     add_bad "analyse des logs SSH insuffisamment détectée dans le script"
@@ -344,8 +366,20 @@ if [[ -n "$REPORT" && -f "$REPORT" ]]; then
     add_bad "installation non documentée dans le rapport"
   fi
 
-  if grep -Eqi 'default via|nameserver|ip -br|127\.0\.0\.1|1\.1\.1\.1|RESEAU|Routes|DNS' "$REPORT"; then
-    add_ok 2 "réseau et tests documentés dans le rapport"
+  REPORT_NETWORK_TERMS=0
+  REPORT_EXPECTED_VALUES=0
+  if grep -Eqi 'default via|nameserver|ip -br|RESEAU|Routes|DNS|Passerelle|Adresse IP' "$REPORT"; then
+    REPORT_NETWORK_TERMS=1
+  fi
+  if grep -Fq "$EXPECTED_IP" "$REPORT" || grep -Fq "$EXPECTED_GATEWAY" "$REPORT" || grep -Fq "$EXPECTED_DNS1" "$REPORT" || grep -Fq "$EXPECTED_DNS2" "$REPORT"; then
+    REPORT_EXPECTED_VALUES=1
+  fi
+
+  if (( REPORT_NETWORK_TERMS == 1 && REPORT_EXPECTED_VALUES == 1 )); then
+    add_ok 2 "réseau documenté dans le rapport avec au moins une valeur attendue"
+  elif (( REPORT_NETWORK_TERMS == 1 )); then
+    add_ok 1 "réseau documenté de manière générale dans le rapport"
+    add_bad "rapport réseau incomplet : aucune valeur attendue IP/passerelle/DNS n'a été retrouvée"
   else
     add_bad "réseau ou tests insuffisamment documentés dans le rapport"
   fi
@@ -365,6 +399,121 @@ else
   add_bad "rapport absent : impossible d'évaluer son contenu"
 fi
 
+# 6. Configuration réseau statique - 22 pts
+section "6. Configuration réseau statique"
+
+EXPECTED_IP_RE="$(escape_egrep "$EXPECTED_IP")"
+EXPECTED_GATEWAY_RE="$(escape_egrep "$EXPECTED_GATEWAY")"
+EXPECTED_DNS1_RE="$(escape_egrep "$EXPECTED_DNS1")"
+EXPECTED_DNS2_RE="$(escape_egrep "$EXPECTED_DNS2")"
+
+if ! has_cmd ip; then
+  add_bad "commande ip absente : impossible de vérifier correctement la configuration réseau"
+else
+  IPV4_LINES="$(ip -o -4 addr show scope global 2>/dev/null || true)"
+  DEFAULT_ROUTES="$(ip route show default 2>/dev/null || true)"
+
+  if printf '%s\n' "$IPV4_LINES" | grep -qE "[[:space:]]inet[[:space:]]+${EXPECTED_IP_RE}/${EXPECTED_CIDR}\b"; then
+    add_ok 6 "adresse IPv4 conforme : ${EXPECTED_IP}/${EXPECTED_CIDR}"
+  else
+    add_bad "adresse IPv4 incorrecte ou absente : attendu ${EXPECTED_IP}/${EXPECTED_CIDR} ; détecté : $(printf '%s' "$IPV4_LINES" | awk '{print $2 ":" $4}' | paste -sd ',' -)"
+  fi
+
+  if printf '%s\n' "$DEFAULT_ROUTES" | grep -qE "^default[[:space:]]+via[[:space:]]+${EXPECTED_GATEWAY_RE}([[:space:]]|$)"; then
+    add_ok 4 "passerelle par défaut conforme : $EXPECTED_GATEWAY"
+  else
+    add_bad "passerelle par défaut incorrecte ou absente : attendu $EXPECTED_GATEWAY ; détecté : $(printf '%s' "$DEFAULT_ROUTES" | paste -sd '|' -)"
+  fi
+fi
+
+dns_effective_found() {
+  local dns="$1"
+  local dns_re
+  dns_re="$(escape_egrep "$dns")"
+
+  if [[ -f /etc/resolv.conf ]] && grep -qE "^[[:space:]]*nameserver[[:space:]]+${dns_re}[[:space:]]*$" /etc/resolv.conf 2>/dev/null; then
+    return 0
+  fi
+
+  if has_cmd resolvectl && resolvectl dns 2>/dev/null | grep -qE "(^|[[:space:]])${dns_re}([[:space:]]|$)"; then
+    return 0
+  fi
+
+  return 1
+}
+
+DNS_FOUND_1=0
+DNS_FOUND_2=0
+dns_effective_found "$EXPECTED_DNS1" && DNS_FOUND_1=1
+dns_effective_found "$EXPECTED_DNS2" && DNS_FOUND_2=1
+
+if [[ "$DNS_FOUND_1" -eq 1 ]]; then
+  add_ok 3 "DNS principal effectif retrouvé : $EXPECTED_DNS1"
+else
+  add_bad "DNS principal absent : attendu $EXPECTED_DNS1 dans /etc/resolv.conf ou via resolvectl"
+fi
+
+if [[ "$DNS_FOUND_2" -eq 1 ]]; then
+  add_ok 3 "DNS secondaire effectif retrouvé : $EXPECTED_DNS2"
+else
+  add_bad "DNS secondaire absent : attendu $EXPECTED_DNS2 dans /etc/resolv.conf ou via resolvectl"
+fi
+
+# Vérification d'une configuration persistante probable.
+# On cherche les paramètres dans les emplacements courants sous Debian et dans quelques variantes possibles.
+CONFIG_FILES=()
+[[ -f /etc/network/interfaces ]] && CONFIG_FILES+=("/etc/network/interfaces")
+
+while IFS= read -r -d '' file; do
+  CONFIG_FILES+=("$file")
+done < <(find \
+  /etc/network/interfaces.d \
+  /etc/systemd/network \
+  /etc/NetworkManager/system-connections \
+  /etc/netplan \
+  -maxdepth 1 -type f -print0 2>/dev/null || true)
+
+PERSISTENT_IP_FOUND=0
+PERSISTENT_GW_FOUND=0
+PERSISTENT_DNS_FOUND=0
+
+for file in "${CONFIG_FILES[@]}"; do
+  [[ -f "$file" ]] || continue
+
+  grep -qF "$EXPECTED_IP" "$file" 2>/dev/null && PERSISTENT_IP_FOUND=1
+  grep -qF "$EXPECTED_GATEWAY" "$file" 2>/dev/null && PERSISTENT_GW_FOUND=1
+  if grep -qF "$EXPECTED_DNS1" "$file" 2>/dev/null || grep -qF "$EXPECTED_DNS2" "$file" 2>/dev/null; then
+    PERSISTENT_DNS_FOUND=1
+  fi
+done
+
+if [[ "$PERSISTENT_IP_FOUND" -eq 1 && "$PERSISTENT_GW_FOUND" -eq 1 ]]; then
+  add_ok 3 "configuration IP persistante probablement présente"
+else
+  add_bad "configuration IP persistante non retrouvée dans les fichiers réseau courants"
+fi
+
+if [[ "$PERSISTENT_DNS_FOUND" -eq 1 || "$DNS_FOUND_1" -eq 1 || "$DNS_FOUND_2" -eq 1 ]]; then
+  add_ok 1 "configuration DNS retrouvée"
+else
+  add_bad "configuration DNS non retrouvée"
+fi
+
+PROOF_POINTS=0
+for proof in "$PROOF_INTERFACE" "$PROOF_IP" "$PROOF_ROUTE" "$PROOF_DNS" "$PROOF_TEST"; do
+  if [[ -s "$proof" ]]; then
+    PROOF_POINTS=$((PROOF_POINTS + 1))
+  else
+    add_bad "fichier de preuve réseau manquant ou vide : $proof"
+  fi
+done
+
+if (( PROOF_POINTS == 5 )); then
+  add_ok 2 "tous les fichiers de preuve réseau sont présents"
+else
+  add_info "fichiers de preuve réseau présents et non vides : ${PROOF_POINTS}/5"
+fi
+
 # Synthèse
 section "Résultat"
 for line in "${OK_ITEMS[@]}"; do printf '%s\n' "$line"; done
@@ -372,16 +521,16 @@ for line in "${BAD_ITEMS[@]}"; do printf '%s\n' "$line"; done
 for line in "${INFO_ITEMS[@]}"; do printf '%s\n' "$line"; done
 
 if (( SCORE > MAX )); then SCORE=$MAX; fi
-NOTE20=$(( (SCORE * 20 + 50) / 100 ))
+NOTE20=$(( (SCORE * 20 + (MAX / 2)) / MAX ))
 printf '\nScore indicatif : %s/%s, soit environ %s/20\n' "$SCORE" "$MAX" "$NOTE20"
-printf 'Points à contrôler manuellement : qualité de la synthèse, autonomie observée, exactitude des mots de passe imposés.\n'
+printf 'Points à contrôler manuellement : qualité de la synthèse, autonomie observée, exactitude des mots de passe imposés, persistance réelle après redémarrage.\n'
 printf 'Nombre de points à revoir : %s\n' "$WARNINGS"
 
-if (( SCORE >= 85 )); then
+if (( SCORE >= (MAX * 85 / 100) )); then
   printf 'Niveau C-PRO proposé : Très satisfaisant\n'
-elif (( SCORE >= 65 )); then
+elif (( SCORE >= (MAX * 65 / 100) )); then
   printf 'Niveau C-PRO proposé : Satisfaisant\n'
-elif (( SCORE >= 40 )); then
+elif (( SCORE >= (MAX * 40 / 100) )); then
   printf 'Niveau C-PRO proposé : Fragile\n'
 else
   printf 'Niveau C-PRO proposé : Insuffisant\n'
